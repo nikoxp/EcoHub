@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version tag, for example v1.0.0"
+        description: "Release version tag (e.g. v1.0.0)"
         required: false
 
 permissions:
@@ -19,51 +19,69 @@ permissions:
 
 jobs:
   publish:
-    name: Publish GitHub release
+    name: Publish GitHub Release
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20  # 或 22，根据你的 web/package.json 调整
 
       - name: Resolve version
         id: version
         shell: bash
         run: |
           if [ -n "${{ inputs.version }}" ]; then
-            version="${{ inputs.version }}"
+            VERSION="${{ inputs.version }}"
           else
-            version="v$(node -p "require('./web/package.json').version")"
+            VERSION="v$(node -p "require('./web/package.json').version")"
           fi
 
-          if [[ ! "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Invalid version: $version" >&2
+          # 版本格式校验
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version format: $VERSION" >&2
             exit 1
           fi
 
-          if ! git rev-parse -q --verify "refs/tags/$version" >/dev/null; then
-            echo "Tag does not exist: $version" >&2
-            exit 1
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Using version: $VERSION"
+
+      - name: Check and create tag if needed
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if ! git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            echo "Tag $VERSION does not exist, creating it..."
+            git tag "$VERSION"
+            git push origin "$VERSION"
+          else
+            echo "Tag $VERSION already exists."
           fi
 
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Publish release
+      - name: Publish or update release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         shell: bash
         run: |
           if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "Updating existing release $VERSION"
             gh release edit "$VERSION" \
               --title "$VERSION" \
               --notes-file RELEASE.md \
               --latest
           else
+            echo "Creating new release $VERSION"
             gh release create "$VERSION" \
               --title "$VERSION" \
               --notes-file RELEASE.md \
-              --latest
+              --latest \
+              --generate-notes  # 可选：自动生成补充说明
           fi
