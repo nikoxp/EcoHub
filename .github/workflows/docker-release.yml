@@ -9,11 +9,15 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "版本号 (例如: v1.2.3 或 v1.2.3-beta.1)"
+        description: "版本号 (例如: v1.2.3)"
         required: true
+      create_tag:
+        description: "是否自动创建并推送 tag（如果不存在）"
+        type: boolean
+        default: true
 
 permissions:
-  contents: read
+  contents: write      # 需要写权限来创建 tag
   packages: write
 
 env:
@@ -31,33 +35,33 @@ jobs:
             context: ./web
             dockerfile: ./web/Dockerfile
             image: ecohub-web
-            build-args: |
-              API_URL=http://server:8080
           - service: server
             context: ./server
             dockerfile: ./server/Dockerfile
             image: ecohub-server
-            build-args: ""
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          # 优先使用 workflow_dispatch 输入的版本，否则使用触发 tag
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.version) || github.ref }}
+          # 默认 checkout main，后续再处理 tag
+          ref: main
 
-      - name: Resolve version
+      - name: Resolve version & prepare tag
         id: meta
         shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          CREATE_TAG: ${{ inputs.create_tag }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ inputs.version }}"
+            VERSION="$INPUT_VERSION"
           else
             VERSION="${GITHUB_REF_NAME}"
           fi
 
-          # 支持语义化版本 + 预发布版本
+          # 版本格式校验（支持预发布）
           if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "❌ Invalid version format: $VERSION" >&2
             exit 1
@@ -67,6 +71,15 @@ jobs:
           echo "owner=$OWNER" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "✅ Using version: $VERSION"
+
+          # 如果 tag 不存在且允许创建，则创建 tag
+          if [ "$CREATE_TAG" = "true" ] && ! git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            echo "🏷️ Creating and pushing tag $VERSION"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag "$VERSION"
+            git push origin "$VERSION"
+          fi
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -88,10 +101,8 @@ jobs:
           file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: ${{ matrix.build-args }}
           tags: |
             ${{ env.REGISTRY }}/${{ steps.meta.outputs.owner }}/${{ matrix.image }}:${{ steps.meta.outputs.version }}
             ${{ env.REGISTRY }}/${{ steps.meta.outputs.owner }}/${{ matrix.image }}:latest
-          labels: ${{ steps.meta.outputs.version }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
